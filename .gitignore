@@ -1,0 +1,50 @@
+# Environment & Secrets (CRITICAL: Do NOT remove)
+.env
+.env.local
+*.env
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Byte-compiled / optimized / DLL files
+*.so
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints
+
+# Node & React (Frontend)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.npm
+*.log
+
+# Docker & OS Files
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# EasyOCR cached models (if downloaded locally)
+.EasyOCR/
+
+# Exclude raw data and large CSV datasets
+raw_data/
+*.csv
