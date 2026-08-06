@@ -1,4 +1,6 @@
 import time
+import os
+import redis
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -15,7 +17,11 @@ app.add_middleware(
 )
 
 engine = None
+# Get REDIS_URL from environment variable (Render), default to local Docker Redis if not set
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
+# Initialize Redis client from URL
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 @app.on_event("startup")
 def startup_event():
     global engine
