@@ -5,7 +5,6 @@ import json
 import asyncio
 import hashlib
 import joblib
-import redis
 import numpy as np
 from PIL import Image
 import easyocr
@@ -14,6 +13,7 @@ from sentence_transformers import SentenceTransformer
 from tavily import AsyncTavilyClient
 from google import genai
 from google.genai import types
+import redis.asyncio as aioredis
 
 load_dotenv(find_dotenv(usecwd=True), override=True)
 
@@ -37,47 +37,61 @@ class InferenceEngine:
         gemini_key = os.getenv("GEMINI_API_KEY")
         self.ai_client = genai.Client(api_key=gemini_key.strip()) if gemini_key and gemini_key.strip() else None
 
-        # --- REDIS CONNECTION ---
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        redis_port = int(os.getenv("REDIS_PORT", 6379))
+        # Redis connection handling (Async)
+        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        self.redis_client = None
+
+    async def init_redis(self):
+        """Async initialization for Redis in production."""
+        # Read full URL first, fall back to localhost if not provided
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         try:
-            self.redis_client = redis.Redis(
-                host=redis_host, 
-                port=redis_port, 
-                db=0, 
-                decode_responses=True,
-                socket_timeout=2.0
+            self.redis_client = aioredis.from_url(
+                redis_url, 
+                decode_responses=True, 
+                socket_timeout=3.0
             )
-            self.redis_client.ping()
-            print("Connected to Redis Cache successfully.")
+            await self.redis_client.ping()
+            print(f"⚡ Connected to Async Redis successfully.")
         except Exception as e:
             print(f"Redis Notice: {e}. Running without cache.")
             self.redis_client = None
 
-    def _get_cache_key(self, text: str) -> str:
+    def _get_cache_key(self, prefix: str, text: str) -> str:
         normalized = re.sub(r'\s+', ' ', text.strip().lower())
-        return f"claim_cache:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+        return f"{prefix}:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
 
-    def get_cached_verdict(self, text: str) -> dict:
+    async def get_cached_verdict(self, prefix: str, text: str) -> dict:
         if not self.redis_client:
             return None
         try:
-            key = self._get_cache_key(text)
-            cached_data = self.redis_client.get(key)
+            key = self._get_cache_key(prefix, text)
+            cached_data = await self.redis_client.get(key)
             if cached_data:
                 res = json.loads(cached_data)
+                
+                # 1. Update verification source text
                 res["verified_by"] = "Redis Cache (0 Tokens / <5ms)"
+                
+                # 2. Explicitly zero out token usage for cache hits
+                res["token_usage"] = {
+                    "prompt_tokens": 0,
+                    "candidates_tokens": 0,
+                    "total_tokens": 0
+                }
+                
+                res["cached"] = True
                 return res
         except Exception as e:
             print(f"Redis Read Error: {e}")
         return None
 
-    def set_cached_verdict(self, text: str, result: dict, ttl_seconds: int = 172800):
+    async def set_cached_verdict(self, prefix: str, text: str, result: dict, ttl_seconds: int = 172800):
         if not self.redis_client:
             return
         try:
-            key = self._get_cache_key(text)
-            self.redis_client.setex(key, ttl_seconds, json.dumps(result))
+            key = self._get_cache_key(prefix, text)
+            await self.redis_client.setex(key, ttl_seconds, json.dumps(result))
         except Exception as e:
             print(f"Redis Write Error: {e}")
 
@@ -110,28 +124,49 @@ class InferenceEngine:
         return " ".join(results).strip()
 
     async def clean_ocr_text(self, raw_ocr_text: str) -> str:
-        """Clean OCR lead snippet using Gemini Flash (~15-25 tokens)."""
-        if not self.ai_client or len(raw_ocr_text.strip()) < 15:
-            return raw_ocr_text
+        """Clean OCR text using Gemini Flash with length preservation guardrails."""
+        clean_raw = raw_ocr_text.strip()
+        
+        # If text is very short or AI client is missing, return raw text directly
+        if not self.ai_client or len(clean_raw) < 15:
+            return clean_raw
 
-        truncated_ocr = raw_ocr_text[:250].replace('\n', ' ')
+        # Limit snippet to first 500 characters
+        truncated_ocr = clean_raw[:500].replace('\n', ' ')
+        
         prompt = (
-            "Clean OCR typos and fix multi-column reading order in this headline snippet. "
-            "Return ONLY the cleaned plain text sentence without commentary:\n"
+            "You are an OCR error corrector. Fix minor OCR typos, repair broken words, and correct numbers "
+            "in the following headline snippet. \n"
+            "CRITICAL RULE: DO NOT summarize, DO NOT truncate, DO NOT omit any sentence or key details.\n"
+            "Return ONLY the corrected full text sentence:\n\n"
             f"\"{truncated_ocr}\""
         )
 
         try:
-            response = self.ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    max_output_tokens=60
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.0,
+                        max_output_tokens=200
+                    )
                 )
             )
-            cleaned = response.text.strip()
+            
+            cleaned = response.text.strip().replace('"', '')
+            
+            # --- LENGTH GUARDRAIL ---
+            # If Gemini truncated the text to less than 40% of original raw length (e.g. "Suk"),
+            # discard AI output and safely fall back to raw OCR text.
+            if len(cleaned) < (len(truncated_ocr) * 0.4):
+                print(f"⚠️ [OCR CLEAN GUARDRAIL TRIGGERED] Discarded truncated output: '{cleaned}'. Retaining raw OCR text.")
+                return truncated_ocr
+                
             return cleaned if cleaned else truncated_ocr
+
         except Exception as e:
             print(f"OCR Clean Fallback: {e}")
             return truncated_ocr
@@ -146,7 +181,6 @@ class InferenceEngine:
             }
 
         try:
-            # Query Tavily for verification sources (increased timeout to 5.0s)
             search_res = await asyncio.wait_for(
                 self.tavily.search(
                     query=f'"{text[:60]}" claim verification', 
@@ -166,17 +200,20 @@ class InferenceEngine:
                 "Return ONLY a JSON object: {\"verdict\": \"REAL\"} or {\"verdict\": \"FAKE\"}"
             )
 
-            response = self.ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0)
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.0,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0)
+                    )
                 )
             )
 
-            # Robust token metadata extraction
             tokens = {"prompt_tokens": 0, "candidates_tokens": 0, "total_tokens": 0}
             if hasattr(response, 'usage_metadata') and response.usage_metadata:
                 usage = response.usage_metadata
@@ -186,7 +223,6 @@ class InferenceEngine:
                     "total_tokens": getattr(usage, 'total_token_count', 0) or 0
                 }
 
-            # Extract JSON output
             match = re.search(r'\{.*\}', response.text, re.DOTALL)
             if match:
                 res_json = json.loads(match.group(0))
@@ -208,13 +244,14 @@ class InferenceEngine:
 
     async def analyze_cascade(self, text: str, threshold: float = 0.85) -> dict:
         # 1. CHECK REDIS CACHE FIRST
-        cached_res = self.get_cached_verdict(text)
+        cached_res = await self.get_cached_verdict("analyze", text)
         if cached_res:
             return cached_res
 
         # 2. Tier 1 Local Model
         t1_result = self.predict_tier1(text)
 
+        # If local model is confident enough, return without calling Gemini
         if t1_result["confidence_score"] >= threshold:
             final_res = {
                 "prediction": t1_result["prediction"],
@@ -223,24 +260,26 @@ class InferenceEngine:
                 "can_explain": True,
                 "token_usage": {"prompt_tokens": 0, "candidates_tokens": 0, "total_tokens": 0}
             }
-            # Cache High Confidence Local Results
-            self.set_cached_verdict(text, final_res)
+            await self.set_cached_verdict("analyze", text, final_res)
+            final_res["cached"] = False
             return final_res
 
-        # 3. Tier 2 RAG Fallback
+        # 3. Tier 2 RAG Fallback (Executes only when confidence < threshold)
         t2_res = await self.verify_minimal_tier2(text)
-        final_verdict = t2_res["label"] if t2_res["label"] != "UNVERIFIED" else t1_result["prediction"]
+        
+        is_verified = t2_res.get("label") != "UNVERIFIED"
+        final_verdict = t2_res["label"] if is_verified else t1_result["prediction"]
 
         final_res = {
             "prediction": final_verdict,
             "confidence_score": t1_result["confidence_score"],
-            "verified_by": "RAG Web Check (Gemini + Tavily)" if t2_res["label"] != "UNVERIFIED" else "Tier 2 Timeout / Tier 1 Safety Net",
+            "verified_by": "RAG Web Check (Gemini + Tavily)" if is_verified else "Tier 2 Timeout / Tier 1 Safety Net",
             "can_explain": True,
-            "token_usage": t2_res["tokens"]
+            "token_usage": t2_res.get("tokens", {"prompt_tokens": 0, "candidates_tokens": 0, "total_tokens": 0})
         }
 
-        # Cache Final Verdict in Redis
-        self.set_cached_verdict(text, final_res)
+        await self.set_cached_verdict("analyze", text, final_res)
+        final_res["cached"] = False
         return final_res
 
     async def analyze_image(self, image_bytes: bytes, threshold: float = 0.98) -> dict:
@@ -250,11 +289,23 @@ class InferenceEngine:
             return {"error": "No readable text found in the image."}
 
         cleaned_text = await self.clean_ocr_text(raw_text)
+        
+        # Check cache for image text
+        cached_res = await self.get_cached_verdict("analyze_image", cleaned_text)
+        if cached_res:
+            return cached_res
+
         cascade_result = await self.analyze_cascade(cleaned_text, threshold=threshold)
         cascade_result["extracted_text"] = cleaned_text
+        
+        await self.set_cached_verdict("analyze_image", cleaned_text, cascade_result)
         return cascade_result
 
     async def explain_tier2(self, text: str) -> dict:
+        cached_res = await self.get_cached_verdict("explain", text)
+        if cached_res:
+            return cached_res
+
         if not self.tavily or not self.ai_client:
             return {"error": "API keys missing."}
 
@@ -266,14 +317,22 @@ class InferenceEngine:
 
             prompt = f"Analyze for factual accuracy:\nClaim: \"{text}\"\nContext: {context}\nProvide a clear Verdict and a concise 2-3 sentence explanation."
 
-            response = self.ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt
+                )
             )
 
-            return {
+            res = {
                 "explanation": response.text,
-                "sources": sources
+                "sources": sources,
+                "verified_by": "Gemini + Tavily Deep Explanation"
             }
+            await self.set_cached_verdict("explain", text, res)
+            res["cached"] = False
+            return res
         except Exception as e:
             return {"error": str(e)}
