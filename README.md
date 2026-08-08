@@ -415,5 +415,5 @@ ML • NLP • OCR • RAG • LLMs • Redis • REST APIs
 
 A practical AI system designed to balance:
 
-Speed · Cost · Accuracy · Scalability
+
 
