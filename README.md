@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 PressIQ — AI-Powered Hybrid Fake News Detection & Verification Engine
 
 PressIQ is an end-to-end, two-tier fake news detection system designed to analyze text claims, headlines, and newspaper clippings in real-time.
@@ -417,4 +416,4 @@ ML • NLP • OCR • RAG • LLMs • Redis • REST APIs
 A practical AI system designed to balance:
 
 Speed · Cost · Accuracy · Scalability
->>>>>>> 82a2200742135f91c98632d61af0380025d53b2f
+
