@@ -49,13 +49,35 @@ export default function FakeNewsDetector() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
+  const processImageFile = (file) => {
     if (file && file.type.startsWith('image/')) {
       setSelectedFile(file);
       setPreviewUrl(URL.createObjectURL(file));
       setAnalysisResult(null);
       setExplanation(null);
+    }
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    processImageFile(file);
+  };
+
+  const handlePaste = (e) => {
+    // Paste functionality for images is enabled only when PressIQ Pro is active
+    if (selectedModel !== 'pro') return;
+
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        const file = items[i].getAsFile();
+        if (file) {
+          processImageFile(file);
+          break;
+        }
+      }
     }
   };
 
@@ -137,7 +159,7 @@ export default function FakeNewsDetector() {
       <div className="bg-[#D8C7A3] text-xs text-center py-2 px-4 font-medium tracking-wide border-b border-[#C4B28E]">
         "Verification cuts through noise & partisan bias." — PressIQ Analytical Engine ★★★★★
       </div>
-
+ 
       {/* Main Content Area */}
       <main className="max-w-6xl mx-auto px-6 py-12 w-full flex-grow">
         
@@ -153,7 +175,7 @@ export default function FakeNewsDetector() {
             See the Full Picture of News Claims. <span className="text-gray-500 font-normal">Text & Image Verification.</span>
           </h1>
           <p className="text-base md:text-lg text-gray-700 font-normal leading-relaxed">
-            Analyze headlines, articles, or news graphic images to detect credibility, OCR extracted claims, and verify ground truth live.
+            Analyze headlines, articles, or news graphic images to detect c bility, OCR extracted claims, and verify ground truth live.
           </p>
         </header>
 
@@ -167,7 +189,7 @@ export default function FakeNewsDetector() {
               <label htmlFor="news-input" className="text-sm font-bold uppercase tracking-wider text-gray-700">
                 {selectedModel === 'pro' && selectedFile 
                   ? 'Image Attached & Text Analysis' 
-                  : 'Paste Article Text or Web URL'}
+                  : 'Paste Article Text, Web URL, or Image'}
               </label>
 
               {/* Dropup Model Switcher */}
@@ -247,9 +269,10 @@ export default function FakeNewsDetector() {
                 rows="5"
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
+                onPaste={handlePaste}
                 placeholder={
                   selectedModel === 'pro'
-                    ? "Paste news claim or attach image using (+) below..."
+                    ? "Paste news claim, paste image directly (Ctrl+V), or attach using (+) below..."
                     : "Paste news headline, full article text, or claim here to analyze authenticity..."
                 }
                 className="w-full bg-[#F2F0EB] text-black border border-[#C5BFAF] rounded-lg p-4 pr-12 focus:outline-none focus:ring-2 focus:ring-[#1A1A1A] resize-none font-mono text-sm placeholder:text-gray-400"
@@ -259,7 +282,9 @@ export default function FakeNewsDetector() {
               {previewUrl && (
                 <div className="absolute left-4 bottom-4 flex items-center gap-2 bg-[#E7E3DA] p-1.5 rounded-md border border-[#C5BFAF]">
                   <img src={previewUrl} alt="Upload preview" className="w-10 h-10 object-cover rounded" />
-                  <span className="text-xs font-mono text-gray-700 max-w-[150px] truncate">{selectedFile?.name}</span>
+                  <span className="text-xs font-mono text-gray-700 max-w-[150px] truncate">
+                    {selectedFile?.name || 'Pasted Image'}
+                  </span>
                   <button
                     type="button"
                     onClick={removeSelectedFile}
@@ -309,7 +334,7 @@ export default function FakeNewsDetector() {
                 <span className="text-xs text-gray-500">
                   {selectedModel === 'lite' 
                     ? 'Lite Model • Text Only • Fast Local ML Screening' 
-                    : 'Pro Model • Multi-modal • LLM Processing & Vision OCR Enabled'}
+                    : 'Pro Model • Multi-modal • Supports Direct Image Paste (Ctrl+V)'}
                 </span>
               </div>
 
@@ -493,7 +518,7 @@ export default function FakeNewsDetector() {
                 <h3 className="font-bold text-white text-lg mb-2 leading-snug">Cuts through the noise & partisan bias</h3>
                 <p className="text-sm text-gray-400 leading-relaxed">"It is my constant go-to for checking headlines. Never before have users had more need for a tool that can help decipher truth from fiction."</p>
               </div>
-              <span className="text-xs text-gray-500 mt-6 block">— Jodi A.</span>
+              <span className="text-xs text-gray-500 mt-6 block">— Ms. xyz</span>
             </div>
             <div className="bg-[#2D2D2D] p-6 rounded-xl border border-[#3A3A3A] flex flex-col justify-between">
               <div>
@@ -501,7 +526,7 @@ export default function FakeNewsDetector() {
                 <h3 className="font-bold text-white text-lg mb-2 leading-snug">Real News & Clear Metrics</h3>
                 <p className="text-sm text-gray-400 leading-relaxed">"It is important to me to have honest news analysis because I do not want to further misinformation. Quick, clear, and unbiased."</p>
               </div>
-              <span className="text-xs text-gray-500 mt-6 block">— Kelly B.</span>
+              <span className="text-xs text-gray-500 mt-6 block">— Mr. xyz</span>
             </div>
             <div className="bg-[#2D2D2D] p-6 rounded-xl border border-[#3A3A3A] flex flex-col justify-between">
               <div>
@@ -509,7 +534,7 @@ export default function FakeNewsDetector() {
                 <h3 className="font-bold text-white text-lg mb-2 leading-snug">The truth always lies in between</h3>
                 <p className="text-sm text-gray-400 leading-relaxed">"PressIQ makes it much easier to research on my own, provides much more info in aggregate, and discourages emotional bias."</p>
               </div>
-              <span className="text-xs text-gray-500 mt-6 block">— Olivia M.</span>
+              <span className="text-xs text-gray-500 mt-6 block">— Mrs. xyz</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-8 border-t border-[#333333] pt-8 text-xs text-gray-400">

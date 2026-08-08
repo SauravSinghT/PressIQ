@@ -184,8 +184,8 @@ class InferenceEngine:
             search_res = await asyncio.wait_for(
                 self.tavily.search(
                     query=f'"{text[:60]}" claim verification', 
-                    search_depth="basic", 
-                    max_results=2
+                    search_depth="advanced",
+                    max_results=5
                 ),
                 timeout=5.0
             )
@@ -228,8 +228,13 @@ class InferenceEngine:
                 res_json = json.loads(match.group(0))
                 label = str(res_json.get("verdict", "FAKE")).strip().upper()
             else:
-                label = "REAL" if "REAL" in response.text.upper() else "FAKE"
-
+                try:
+                    data = json.loads(response.text)
+                    label = data["verdict"].strip().upper()
+                except:
+                    label = "UNVERIFIED"
+            print("Gemini Raw Response:", response.text)
+            print("Final Label:", label)
             return {
                 "label": label if label in ["REAL", "FAKE"] else "FAKE",
                 "tokens": tokens
@@ -315,7 +320,22 @@ class InferenceEngine:
             context = "\n\n".join([f"Source ({r['url']}): {r['content']}" for r in results])
             sources = [r['url'] for r in results]
 
-            prompt = f"Analyze for factual accuracy:\nClaim: \"{text}\"\nContext: {context}\nProvide a clear Verdict and a concise 2-3 sentence explanation."
+            prompt = f"""
+                        The claim has ALREADY been classified.
+
+                        Claim:
+                        {text}
+
+                        Context:
+                        {context}
+
+                        Explain WHY the claim is supported or contradicted by the sources.
+
+                        Do NOT give another verdict.
+                        Do NOT say REAL or FAKE.
+
+                        Return only a short explanation.
+                        """
 
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
