@@ -20,34 +20,7 @@ import {
   Image as ImageIcon
 } from 'lucide-react';
 
-// Relative by default: nginx serves this build and proxies /api to the backend,
-// so requests are same-origin and never trigger CORS. In `npm run dev` the Vite
-// dev server proxies /api the same way. Override only when the API lives on a
-// different host (set VITE_API_BASE_URL at build time).
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
-
-// A failing proxy or gateway answers with an empty body or an HTML error page,
-// neither of which parses as JSON. Report why the call failed instead of letting
-// the parse error surface as the message.
-async function readJson(response) {
-  const body = (await response.text()).trim();
-
-  if (!body) {
-    throw new Error(
-      `Server returned ${response.status} with an empty response. ` +
-      `Is the backend running and reachable at ${API_BASE}?`
-    );
-  }
-
-  try {
-    return JSON.parse(body);
-  } catch {
-    throw new Error(
-      `Server returned ${response.status} but the response was not JSON ` +
-      `(got ${response.headers.get('content-type') || 'no content type'}).`
-    );
-  }
-}
+const API_BASE = 'http://127.0.0.1:8000';
 
 export default function FakeNewsDetector() {
   // Model state: 'lite' (Text only) or 'pro' (Multimodal: Text + Image)
@@ -141,12 +114,12 @@ export default function FakeNewsDetector() {
         });
       }
 
-      const data = await readJson(response);
-
       if (!response.ok) {
-        throw new Error(data.detail || `Server error: ${response.status}`);
+        const errorData = await response.json();
+        throw new Error(errorData.detail || `Server error: ${response.status}`);
       }
 
+      const data = await response.json();
       setAnalysisResult(data);
     } catch (err) {
       alert(`Analysis failed: ${err.message}`);
@@ -168,10 +141,8 @@ export default function FakeNewsDetector() {
         body: JSON.stringify({ text: queryText }),
       });
 
-      const data = await readJson(response);
-      if (!response.ok) {
-        throw new Error(data.detail || `Server returned ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`Server returned ${response.status}`);
+      const data = await response.json();
       setExplanation(data);
     } catch (err) {
       alert('Failed to fetch detailed explanation.');
