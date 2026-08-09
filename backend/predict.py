@@ -204,7 +204,7 @@ class InferenceEngine:
             response = await loop.run_in_executor(
                 None,
                 lambda: self.ai_client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-2.5-flash-lite',
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
