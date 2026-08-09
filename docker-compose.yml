@@ -9,10 +9,16 @@ services:
     environment:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    expose:
-      - "8000"
+      # predict.py reads REDIS_URL; REDIS_HOST/REDIS_PORT were never used, so the
+      # backend silently fell back to localhost and ran with the cache disabled.
+      - REDIS_URL=redis://redis:6379
+      # Same-origin behind nginx, so this is only used if the SPA is ever hosted
+      # elsewhere. Comma-separated list of origins, e.g. https://app.example.com
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+    # Published so `npm run dev` can proxy straight to it. In the container-only
+    # deployment nothing outside nginx needs this; drop it to keep 8000 private.
+    ports:
+      - "8000:8000"
     depends_on:
       - redis
 
@@ -24,9 +30,11 @@ services:
     ports:
       - "6379:6379"
 
-  # 3. Nginx Reverse Proxy / Load Balancer
+  # 3. Nginx: serves the React build and reverse-proxies /api to the backend
   nginx:
-    image: nginx:alpine
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: pressiq_nginx_lb
     restart: always
     ports:
