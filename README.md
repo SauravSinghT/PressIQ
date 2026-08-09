@@ -1,419 +1,345 @@
-PressIQ — AI-Powered Hybrid Fake News Detection & Verification Engine
+# PressIQ
 
-PressIQ is an end-to-end, two-tier fake news detection system designed to analyze text claims, headlines, and newspaper clippings in real-time.
+**AI-Powered Hybrid Fake News Detection & Verification Engine**
 
-By combining in-memory Redis caching, sub-30ms local machine learning models, and live Web-Retrieval Augmented Generation (RAG) powered by multimodal LLMs, PressIQ delivers instant results for known claims, executes ultra-fast local checks, and falls back to real-time internet searches for low-confidence headlines—all while minimizing API costs.
+PressIQ is a full-stack news verification system that analyzes text claims, headlines, and newspaper images. It combines local ML, OCR, Redis caching, live web search, and an LLM into a single cost-aware pipeline.
 
-Simple Architectural Breakdown (How PressIQ Works)
-Instead of sending every request to expensive AI services, PressIQ works like a smart multi-level filter:
+The core idea in one line:
 
-Step 1: Check Redis Cache (< 5ms)
-If someone asks about a headline that PressIQ has analyzed before, Redis immediately returns the saved answer in under 5 milliseconds with zero computational cost.
-
-Step 2: Tier 1 Local ML Screening (Sub-30ms)
-For new claims, a local model (SentenceTransformer + fine-tuned XGBoost) evaluates the text right on your server. If the model is 85%+ confident, it returns the prediction instantly—using 0 API tokens.
-
-Step 3: Tier 2 Live Web RAG Fallback (600–900ms)
-If the local model isn't confident (less than 85%), PressIQ triggers a real-time web search via the Tavily Search API to fetch ground-truth news articles, then uses Google Gemini 2.5 Flash to verify facts and output a final JSON verdict.
-
-Step 4: Image/OCR Preprocessing
-When users upload a newspaper snippet or image, EasyOCR extracts the text, and a lightweight cleanup step fixes broken lines and columns before feeding the clean text into the pipeline.
-
-[ User Input ]
-                                  ┌──────┴──────┐
-                                  │             │
-                          (Text Claim)    (Image Input)
-                                  │             │
-                                  │        [ EasyOCR ]
-                                  │             │
-                                  │     [ LLM OCR Cleanup ]
-                                  │             │
-                                  └──────┬──────┘
-                                         │
-                             ┌───────────────────────┐
-                             │  Redis Rate Limiting  │
-                             └───────────┬───────────┘
-                                         │
-                             ┌───────────────────────┐
-                             │  Redis Cache Check    │
-                             └───────────┬───────────┘
-                                         │
-                        ┌────────────────┴────────────────┐
-                        │                                 │
-                   (Cache HIT)                       (Cache MISS)
-                        │                                 │
-              [ Return Cached Verdict ]       [ Tier 1: Local XGBoost Engine ]
-                   (Sub-5ms)                  (SentenceTransformer Embeddings)
-                                                          │
-                                         ┌────────────────┴────────────────┐
-                                         │                                 │
-                                Confidence >= Threshold           Confidence < Threshold
-                                         │                                 │
-                               [ Instant Verdict ]              [ Tier 2: RAG Verification ]
-                              (Sub-30ms / 0 Tokens)             ┌──────────┴──────────┐
-                                                                │                     │
-                                                         [ Tavily Web Search ] [ Gemini LLM ]
-                                                                │                     │
-                                                                └──────────┬──────────┘
-                                                                           │
-                                                                 [ Final Verified Verdict ]
-                                                                           │
-                                                                 [ Save Result to Redis ]
-=======
-PressIQ
-
-AI-Powered Hybrid Fake News Detection & Verification Engine
-
-PressIQ is a full-stack news verification system that analyzes text claims, headlines, and newspaper images.
-
-It combines:
-
-Local ML + OCR + Redis Caching + Web Search + Gemini
-
-The main idea is simple:
-
-«Check locally first. If uncertain, check Redis. Only then use live web search and Gemini.»
+> **Check the cache first. Then check locally. Only pay for live web search + Gemini when the local model is genuinely uncertain.**
 
 ---
 
-Key Features
+## 1. Problem Statement
 
-- Fast local fake-news classification
-- SentenceTransformer + XGBoost
-- Newspaper image analysis with EasyOCR
-- Live verification using Tavily
-- Gemini-powered evidence verification
-- Redis cache with 48-hour TTL
-- Reduced API calls and token usage
-- Structured JSON responses
+Fake news verification has a fundamental cost/latency problem:
+
+- **Naive approach:** send every claim to an LLM with web search. Accurate, but ~1 second latency and a paid API call on *every single request* — including repeat requests for the same viral headline.
+- **Pure local ML:** fast and free, but a model trained on a static dataset cannot verify claims about events that happened after training. It has no notion of ground truth.
+
+PressIQ resolves this with a **confidence-based cascade**: a cheap local classifier handles the easy majority of traffic, and expensive live verification is reserved for the uncertain minority.
+
+### Requirements
+
+**Functional**
+- Classify a text claim as REAL or FAKE with a confidence score
+- Accept newspaper/screenshot images and extract the claim via OCR
+- Provide an on-demand, evidence-backed explanation with cited live sources
+- Return structured JSON
+
+**Non-Functional**
+- Minimize per-request cost (LLM tokens are the dominant cost driver)
+- Low latency on the common path
+- Degrade gracefully when external dependencies fail
+- Be observable: every response reports which path served it, its latency, and its token cost
 
 ---
 
-System Architecture
+## 2. High-Level Architecture
 
+```mermaid
 flowchart LR
-
     USER["User"]
-
-    UI["React<br/>Frontend"]
-
-    API["FastAPI"]
-
-    ML["Local ML<br/>SentenceTransformer<br/>+ XGBoost"]
-
-    REDIS[("Redis<br/>48h Cache")]
-
-    TAVILY["Tavily"]
-
-    GEMINI["Gemini"]
-
-    RESULT["Verdict"]
+    UI["React + Vite<br/>Frontend"]
+    API["FastAPI<br/>Backend"]
+    REDIS[("Redis<br/>48h TTL Cache")]
+    ML["Tier 1<br/>MiniLM + XGBoost<br/>(in-process)"]
+    OCR["EasyOCR<br/>(in-process)"]
+    TAVILY["Tavily<br/>Web Search API"]
+    GEMINI["Google Gemini<br/>2.5 Flash"]
 
     USER --> UI
-    UI --> API
+    UI -->|"REST / JSON"| API
+    API --> REDIS
     API --> ML
-
-    ML -->|"High Confidence"| RESULT
-    ML -->|"Low Confidence"| REDIS
-
-    REDIS -->|"Cache Hit"| RESULT
-    REDIS -->|"Cache Miss"| TAVILY
-
+    API --> OCR
+    API -->|"only on low confidence"| TAVILY
     TAVILY --> GEMINI
-    GEMINI --> REDIS
-    REDIS --> RESULT
+    GEMINI --> API
+```
 
-How it works
-
-User
- ↓
-FastAPI
- ↓
-Local ML
- ↓
- ├── High Confidence → Verdict
- │
- └── Low Confidence
-          ↓
-       Redis
-       /   \
-     HIT   MISS
-      ↓      ↓
-   Verdict  Tavily
-              ↓
-           Gemini
-              ↓
-            Redis
-              ↓
-           Verdict
+**Key architectural property:** the ML model, the OCR engine, and the cache lookup all run *inside* the API process or on the local network. The only calls that leave the datacenter — Tavily and Gemini — are gated behind a confidence check. That gate is the entire design.
 
 ---
 
-Verification Flow
+## 3. The Cascade — Request Lifecycle
 
+This is the heart of the system. A request falls through three layers, and **stops at the first one that can answer it**.
+
+```mermaid
 flowchart TD
+    A["Incoming Claim"] --> B{"L0: Redis<br/>cache hit?"}
 
-    A["Text / Newspaper Image"]
+    B -->|"HIT"| C["Return cached verdict<br/>~5ms · 0 tokens"]
 
-    B["OCR if Image"]
+    B -->|"MISS"| D["L1: Local ML<br/>MiniLM embedding → XGBoost"]
+    D --> E{"confidence<br/>>= 0.85?"}
 
-    C["SentenceTransformer"]
+    E -->|"YES"| F["Return local verdict<br/>~30ms · 0 tokens"]
 
-    D["XGBoost"]
+    E -->|"NO"| G["L2: Live RAG Verification"]
+    G --> H["Tavily web search<br/>top 5 results · 5s timeout"]
+    H --> I["Gemini 2.5 Flash<br/>structured JSON verdict"]
+    I --> J["Return verified verdict<br/>~600-900ms · paid tokens"]
 
-    E{"Confidence?"}
-
-    F["Local Verdict"]
-
-    G[("Redis")]
-
-    H{"Cached?"}
-
-    I["Cached Result"]
-
-    J["Tavily Search"]
-
-    K["Gemini Verification"]
-
-    L["Save to Redis<br/>48 Hours"]
-
-    M["Final Verdict"]
-
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-
-    E -->|"High"| F
-    F --> M
-
-    E -->|"Low"| G
-    G --> H
-
-    H -->|"Yes"| I
-    I --> M
-
-    H -->|"No"| J
+    F --> K[("Write to Redis<br/>TTL 48h")]
     J --> K
-    K --> L
-    L --> M
+```
+
+### Layer breakdown
+
+| Layer | Component | Latency | Cost | Purpose |
+|---|---|---|---|---|
+| **L0** | Redis cache | ~5 ms | Free | Absorb repeat traffic on viral claims |
+| **L1** | MiniLM + XGBoost | ~30 ms | Free | Handle the confident majority locally |
+| **L2** | Tavily + Gemini | ~600–900 ms | Paid | Ground-truth check for uncertain claims |
+
+### Why cache *before* the model, not after?
+
+A cache hit costs ~5 ms and zero CPU. Running the local model first would burn embedding + inference compute on every request before discovering the answer was already known. Cheapest check always goes first — this is the standard cache-aside ordering.
+
+### Why 0.85 as the threshold?
+
+It is the tuning knob that trades **cost against accuracy**:
+
+- **Raise it → more accurate, more expensive.** More requests are deemed "uncertain" and escalate to paid Tier 2 verification.
+- **Lower it → cheaper, riskier.** More requests are answered by a local model that may be confidently wrong.
+
+0.85 was chosen so that the local model only auto-answers when it is strongly decisive, while the ambiguous middle band gets real evidence. **This is the single most interesting number in the system — expect to be asked to justify it.**
 
 ---
 
-Redis Caching
+## 4. Image / OCR Pipeline
 
-Redis is used to avoid repeating expensive web searches and Gemini calls.
+Images converge into the exact same cascade — OCR is a preprocessing stage, not a separate path.
 
-First Request
-
-Claim
- ↓
-Redis MISS
- ↓
-Tavily
- ↓
-Gemini
- ↓
-Save to Redis
- ↓
-TTL: 48 Hours
-
-Same / Similar Request Later
-
-Claim
- ↓
-Redis HIT
- ↓
-Cached Result
-
-This reduces:
-
-- Repeated Tavily searches
-- Repeated Gemini calls
-- Gemini token consumption
-- Verification latency
-- External API usage
-
-Why 48 Hours?
-
-News can change quickly, so verification results are cached for 48 hours and then automatically expire.
-
----
-
-Image Verification
-
-PressIQ can also verify newspaper images.
-
+```mermaid
 flowchart LR
+    IMG["Newspaper Image"] --> DS["Downscale<br/>max 1280px"]
+    DS --> OCR["EasyOCR<br/>paragraph mode"]
+    OCR --> CLEAN["Gemini OCR cleanup<br/>+ length guardrail"]
+    CLEAN --> CASCADE["→ Standard Cascade<br/>(L0 → L1 → L2)"]
+```
 
-    IMAGE["Newspaper Image"]
+Two design details worth calling out in an interview:
 
-    OCR["EasyOCR"]
+**1. Downscaling before OCR.** Images are capped at 1280px on the longest edge before hitting EasyOCR. OCR cost scales with pixel count, and newspaper text remains legible at that resolution — a cheap, large latency win.
 
-    CLEAN["OCR Cleanup"]
+**2. The OCR cleanup guardrail.** Raw OCR output is noisy (broken words, merged columns), so it is passed through Gemini for correction. But an LLM asked to "clean" text will sometimes *summarize* it instead — destroying the claim. So the output is validated: **if the cleaned text is shorter than 40% of the input, the LLM result is discarded and the raw OCR text is used instead.**
 
-    CLAIM["Extracted Claim"]
-
-    ML["Local ML"]
-
-    VERIFY["Verification"]
-
-    IMAGE --> OCR
-    OCR --> CLEAN
-    CLEAN --> CLAIM
-    CLAIM --> ML
-    ML --> VERIFY
-
-The image pipeline is:
-
-Image
- ↓
-EasyOCR
- ↓
-OCR Cleanup
- ↓
-Claim Extraction
- ↓
-Local ML
- ↓
-Redis / Web Verification
+This is a good example of a general principle: *never trust an LLM's output shape without validating it.* The guardrail converts a silent correctness failure into a safe fallback.
 
 ---
 
-Tech Stack
+## 5. Caching Design
 
-Category| Technology
-Backend| FastAPI, Python
-ML| XGBoost, SentenceTransformers
-OCR| EasyOCR, Pillow
-LLM| Google Gemini Flash
-Web Search| Tavily
-Cache| Redis
-Frontend| React, Vite, Tailwind CSS
+```
+Key:   "{prefix}:{sha256(normalized_text)}"
+       prefix ∈ { analyze, analyze_image, explain }
+Value: the full verdict JSON
+TTL:   172800s (48 hours)
+```
+
+**Normalization** — text is lowercased, trimmed, and internal whitespace collapsed before hashing. This makes the cache resilient to trivial formatting differences.
+
+**Why hash the text instead of using it as the key?** Claims are arbitrarily long and contain characters awkward for keys; SHA-256 gives a fixed-size, safe, uniformly-distributed key.
+
+**Why 48 hours?** A correctness-vs-reuse tradeoff. News develops — a claim that is unverified today may be confirmed tomorrow, so verdicts must not be cached forever. 48h is long enough to absorb a viral news cycle (where the same headline is checked thousands of times) but short enough that verdicts stay fresh.
+
+**Known limitation — exact match only.** The cache keys on a hash, so it only hits on *textually identical* claims. A paraphrase of a cached claim misses entirely. The natural upgrade is a **semantic cache**: embed the claim (the MiniLM encoder is already loaded), do a vector similarity search, and treat >0.95 cosine similarity as a hit. Redis supports vector search natively. *Expect this exact question — "what if someone rewords the claim?"*
+
+**Cache hits are annotated,** not returned raw: `verified_by` is overwritten to indicate a cache hit and `token_usage` is explicitly zeroed, so cost reporting stays honest.
 
 ---
 
-API
+## 6. Failure Modes & Graceful Degradation
 
-"POST /analyze"
+The system is designed so that no external dependency is load-bearing.
 
-Analyze a text claim.
+| Failure | Behavior |
+|---|---|
+| **Redis down** | Connection error is caught at startup; `redis_client` set to `None`. Every cache call short-circuits and the system runs cache-less. Slower and more expensive, **but fully functional.** |
+| **Tavily / Gemini down or timing out** | Tier 2 returns `UNVERIFIED`. The system **falls back to the Tier 1 local prediction** rather than erroring — labelled `"Tier 2 Timeout / Tier 1 Safety Net"` so the degradation is visible in the response. |
+| **API keys missing** | Clients initialize to `None`; Tier 2 is skipped entirely and Tier 1 always answers. |
+| **Tavily returns no results** | The LLM is given `"No direct reporting found."` as context rather than an empty string, so it reasons about *absence of evidence* explicitly. |
+| **Tavily slow** | Hard 5-second timeout via `asyncio.wait_for` bounds worst-case latency. |
 
-{
-  "text": "Food Safety and Standards Authority of India directs discontinuation of misleading labels."
-}
+**The pattern:** every external dependency is optional, and every degradation is *reported in the response* rather than hidden. A user always gets an answer; the `verified_by` field tells them how much to trust it.
 
-Example response:
+---
 
+## 7. Cost Model
+
+Cost is dominated by Gemini tokens, so the metric that matters is **what fraction of traffic reaches Tier 2.**
+
+```
+Total cost ≈ (requests reaching L2) × (cost per Gemini call)
+```
+
+Three execution paths and their economics:
+
+| Path | Condition | External API calls |
+|---|---|---|
+| **Cached** | Claim seen in last 48h | 0 |
+| **Fast** | Cache miss, local confidence ≥ 0.85 | 0 |
+| **Verification** | Cache miss **and** low confidence | 1 Tavily + 1 Gemini |
+
+Two multiplicative filters sit in front of the paid path — the cache absorbs repeats, and the local model absorbs confident cases. Only claims that are *both novel and ambiguous* cost money.
+
+**Additional token optimizations in the code:**
+- `thinking_budget=0` on the Tier 2 verdict call — disables Gemini's extended reasoning, which is unnecessary for a binary REAL/FAKE decision and would otherwise consume significant tokens
+- Search result context is truncated to 180 chars per result (5 results) to bound the prompt size
+- `response_mime_type="application/json"` forces structured output instead of prose, reducing output tokens
+- The cheaper `gemini-2.5-flash-lite` model is used for the explanation endpoint
+- Explanations are **on-demand only** — generated when the user explicitly clicks, not eagerly on every verdict
+
+---
+
+## 8. API Reference
+
+### `GET /`
+Health check. Returns service status and whether Redis is connected.
+
+```json
+{ "status": "online", "redis_connected": true }
+```
+
+### `POST /analyze`
+Analyze a text claim through the full cascade.
+
+```json
+// Request
+{ "text": "FSSAI directs discontinuation of misleading labels." }
+
+// Response
 {
   "prediction": "REAL",
   "confidence_score": 0.892,
-  "verified_by": "RAG Web Check",
+  "verified_by": "RAG Web Check (Gemini + Tavily)",
   "can_explain": true,
+  "token_usage": { "prompt_tokens": 412, "candidates_tokens": 8, "total_tokens": 420 },
+  "cached": false,
   "latency_ms": 1120.45
 }
+```
 
-"POST /analyze-image"
+The `verified_by` field is the observability hook — it names which layer produced the verdict (`Redis Cache`, `Local Model (High Certainty)`, `RAG Web Check`, or `Tier 2 Timeout / Tier 1 Safety Net`).
 
-Upload and analyze a newspaper image.
+### `POST /analyze-image`
+`multipart/form-data` with a `file` field. Runs OCR → cleanup → cascade. Response matches `/analyze` plus an `extracted_text` field showing what the OCR read.
 
-Content-Type: multipart/form-data
-
-file: <image>
-
-"POST /explain"
-
-Generate a detailed explanation for a claim.
-
-{
-  "text": "Claim snippet or extracted headline"
-}
+### `POST /explain`
+Generates an evidence-backed explanation with cited live source URLs. Deliberately instructed *not* to re-issue a verdict — it explains the existing one, keeping the classification and explanation responsibilities separate.
 
 ---
 
-Optimization
+## 9. Tech Stack
 
-PressIQ has three main execution paths.
-
-1. Fast Path
-
-Local ML
-   ↓
-High Confidence
-   ↓
-Verdict
-
-No external API call.
-
-2. Cached Path
-
-Local ML
-   ↓
-Low Confidence
-   ↓
-Redis HIT
-   ↓
-Cached Verdict
-
-No Tavily or Gemini call.
-
-3. Verification Path
-
-Local ML
-   ↓
-Low Confidence
-   ↓
-Redis MISS
-   ↓
-Tavily
-   ↓
-Gemini
-   ↓
-Redis
-   ↓
-Verdict
-
-The expensive path is therefore limited to:
-
-«Low-confidence + uncached requests»
+| Layer | Technology | Rationale |
+|---|---|---|
+| Backend | FastAPI (Python), Uvicorn | Native async — essential since the request path is I/O-bound on Redis/Tavily/Gemini |
+| Embeddings | SentenceTransformers `all-MiniLM-L6-v2` | 384-dim, small enough to run on CPU in milliseconds |
+| Classifier | XGBoost | Strong on dense tabular/embedding features; fast inference |
+| OCR | EasyOCR + Pillow | CPU-only deployment, no GPU dependency |
+| LLM | Google Gemini 2.5 Flash / Flash-Lite | Low latency, structured JSON output, cheap per token |
+| Web Search | Tavily | Search API purpose-built for LLM/RAG context retrieval |
+| Cache | Redis (async client) | Sub-ms lookups, native TTL support |
+| Frontend | React 19, Vite, Tailwind CSS | — |
+| Deployment | Docker, docker-compose, Nginx | Nginx reverse-proxies to the backend with `least_conn` balancing |
 
 ---
 
-Engineering Highlights
+## 10. Scaling Path
 
-Confidence-Based Cascade
+How this evolves from a single container to real traffic:
 
-Local ML acts as the first verification layer. Only uncertain predictions move to the more expensive verification pipeline.
+**1. Horizontal scaling.** The FastAPI backend is stateless — all state lives in Redis. Scale by running N replicas behind the existing Nginx load balancer. The constraint is memory: each replica loads its own copy of MiniLM, XGBoost, and EasyOCR into RAM.
 
-Redis Verification Cache
+**2. Separate the ML workers.** Model loading is slow and memory-heavy, while the API layer is thin. Splitting inference into a dedicated service lets the two scale independently and drops API cold-start time significantly.
 
-Recently verified results are cached for 48 hours, reducing repeated searches and Gemini token usage.
+**3. Semantic caching.** As described in §5 — the single highest-leverage cost optimization remaining, since it converts paraphrase misses into hits.
 
-Structured LLM Output
+**4. Async job queue for images.** OCR is CPU-bound and slow relative to text analysis. Under load it should move to a Celery/RQ worker pool with the client polling for results, so image uploads cannot starve the fast text path.
 
-Gemini returns structured JSON, making the response easier for the backend to validate and process.
-
-Multimodal Input
-
-Both text and newspaper images ultimately enter the same verification pipeline.
-
-Cost-Aware Architecture
-
-Instead of calling an LLM for every request, PressIQ only uses external AI verification when local ML is uncertain and no cached result is available.
+**5. Batch the embeddings.** Under concurrent load, micro-batching encode calls yields much better throughput than one-at-a-time inference.
 
 ---
 
-Architecture in One Line
+## 11. Known Limitations
 
-«PressIQ uses local ML for speed, Redis for reuse, and live RAG + Gemini for uncertain claims that need fresh verification.»
+Stated honestly — being able to critique your own system is usually the point of the question.
+
+- **No authentication or rate limiting.** The endpoints are public and proxy paid APIs, so there is currently no protection against abuse driving up cost. This is the highest-priority gap.
+- **Exact-match caching only** — paraphrased claims miss the cache (§5).
+- **Tier 1 is only as good as its training data.** A static classifier cannot reason about events after its training cutoff; this is precisely why Tier 2 exists, but a *confidently wrong* Tier 1 prediction above threshold never reaches Tier 2 and is returned as-is.
+- **Ambiguous LLM output defaults to FAKE.** If Gemini returns an unparseable verdict, the code falls back to `"FAKE"` rather than `"UNVERIFIED"` — a bias that should be corrected.
+- **Cold start is slow.** Loading three ML models takes several seconds, during which requests can fail. Needs a readiness gate.
+- **Binary classification only.** Real-world claims are frequently partially true; REAL/FAKE has no room for "misleading" or "lacks context."
+- **No automated tests or CI.**
 
 ---
 
-What PressIQ Demonstrates
+## 12. Local Setup
 
-ML • NLP • OCR • RAG • LLMs • Redis • REST APIs
+```bash
+# Backend
+pip install -r requirements.txt
+uvicorn backend.main:app --reload      # → http://127.0.0.1:8000
 
-A practical AI system designed to balance:
+# Frontend
+cd frontend
+npm install
+npm run dev                            # → http://localhost:5173
+```
 
-Speed · Cost · Accuracy · Scalability
+The dev server proxies `/api` to `http://127.0.0.1:8000`, so the frontend calls
+the backend same-origin and never trips CORS. Point it at a different backend
+with `VITE_DEV_API_TARGET`.
 
+Requires a `.env` in the project root:
+
+```env
+TAVILY_API_KEY=your_key_here
+GEMINI_API_KEY=your_key_here
+REDIS_URL=redis://localhost:6379
+```
+
+Or run the full stack (frontend + backend + Redis + Nginx):
+
+```bash
+docker compose up --build              # → http://localhost
+```
+
+Nginx serves the React build at `/` and proxies `/api/*` to FastAPI, so the whole
+app is one origin — no CORS involved. If you instead host the frontend somewhere
+else, build it with `VITE_API_BASE_URL=https://your-backend` and set
+`ALLOWED_ORIGINS=https://your-frontend` on the backend so it emits the matching
+`Access-Control-Allow-Origin`.
+
+---
+
+## 13. Interview Cheat Sheet
+
+**The 30-second pitch**
+
+> PressIQ is a fake news verification API built around a three-layer cascade. A Redis cache absorbs repeat claims in about 5 milliseconds. A local MiniLM-plus-XGBoost classifier handles anything it's confident about in around 30 milliseconds, for free. Only claims that are both novel and ambiguous — below an 85% confidence threshold — escalate to live web search plus Gemini, which costs money and takes under a second. The whole design is about keeping expensive calls off the common path, and every response reports which layer served it, so cost and latency are always observable.
+
+**Likely questions and where the answer lives**
+
+| Question | Section |
+|---|---|
+| Why check the cache before the model? | §3 |
+| How did you pick 0.85? What happens if you change it? | §3 |
+| What if the user rewords the claim? | §5 — semantic caching |
+| Why a 48-hour TTL and not longer? | §5 |
+| What happens when Redis / Gemini goes down? | §6 |
+| How do you keep LLM costs down? | §7 |
+| How does this scale to 100× traffic? | §10 |
+| What's wrong with it / what would you fix first? | §11 — lead with auth + rate limiting |
+
+**Themes worth emphasizing**
+
+1. **Cost-aware design.** The cascade exists because LLM calls are the dominant cost; two filters sit in front of the expensive path.
+2. **Graceful degradation.** No external dependency is load-bearing — every failure has a fallback, and every fallback is reported rather than hidden.
+3. **Validating LLM output.** The OCR length guardrail (§4) shows treating an LLM as an unreliable component that needs its output checked.
+4. **Observability.** `verified_by`, `latency_ms`, and `token_usage` on every response mean the system's behavior is measurable in production, not guessed at.

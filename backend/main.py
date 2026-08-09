@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,10 +10,21 @@ logger = logging.getLogger("uvicorn")
 
 app = FastAPI(title="PressIQ API", version="2.0")
 
+# Under Docker nginx serves the SPA and proxies /api, so requests are same-origin
+# and CORS never applies. This only matters when the frontend is hosted elsewhere:
+# set ALLOWED_ORIGINS="https://a.example,https://b.example" to name those hosts.
+# Credentials stay off — the API uses no cookies or auth headers, and browsers
+# reject "*" as an allowed origin the moment credentials are enabled.
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
